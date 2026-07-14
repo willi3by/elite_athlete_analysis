@@ -2,6 +2,11 @@
 
 # Complete post-segmentation analysis for Frontiers manuscript 1904810.
 #
+# The primary PCA and Bayesian models preserve the variable order, preprocessing,
+# response definitions, and unmodified PCA signs used in the original analysis.
+# Editorially requested additions (KINARM bootstrap, parallel analysis, alternate
+# performance definitions, and hockey sensitivity analyses) are identified below.
+#
 # Run from the repository root:
 #   Rscript revision_analyses.R
 #
@@ -234,30 +239,22 @@ format_p <- function(x) {
 format_mean_sd <- function(x) sprintf("%.1f ± %.1f", mean(x, na.rm = TRUE), sd(x, na.rm = TRUE))
 format_count_pct <- function(n, denom) sprintf("%d (%.0f%%)", n, 100 * n / denom)
 
-categorical_p <- function(tab, seed = 123L) {
+categorical_p <- function(tab) {
   if (any(dim(tab) < 2L)) return(NA_real_)
   expected <- suppressWarnings(chisq.test(tab, correct = FALSE)$expected)
   if (any(expected < 5)) {
-    set.seed(seed)
-    suppressWarnings(chisq.test(tab, simulate.p.value = TRUE, B = 200000)$p.value)
+    # This mirrors the default categorical test used by gtsummary::add_p().
+    tryCatch(
+      fisher.test(tab, workspace = 2e8)$p.value,
+      error = function(e) {
+        warning("Exact Fisher test failed; using a deterministic Monte Carlo fallback: ", conditionMessage(e))
+        set.seed(123L)
+        fisher.test(tab, simulate.p.value = TRUE, B = 200000)$p.value
+      }
+    )
   } else {
     suppressWarnings(chisq.test(tab, correct = FALSE)$p.value)
   }
-}
-
-orient_components <- function(loadings, scores, anchors, desired_signs) {
-  stopifnot(length(anchors) == ncol(loadings), length(desired_signs) == ncol(loadings))
-  for (j in seq_len(ncol(loadings))) {
-    anchor <- anchors[[j]]
-    if (!anchor %in% rownames(loadings)) stop("Missing PCA anchor variable: ", anchor)
-    observed <- sign(loadings[anchor, j])
-    if (observed == 0) stop("PCA anchor loading is zero for ", anchor)
-    if (observed != desired_signs[[j]]) {
-      loadings[, j] <- -loadings[, j]
-      scores[, j] <- -scores[, j]
-    }
-  }
-  list(loadings = loadings, scores = scores)
 }
 
 loading_display_wide <- function(loadings, variance_pct, labels, threshold = 0.20, strict = FALSE) {
@@ -471,13 +468,24 @@ dat <- readr::read_csv(data_path, show_col_types = FALSE)
 if (nrow(dat) != 51L) warning("Expected 51 participants; found ", nrow(dat), ".")
 
 brain_vars <- c(
-  "Left.Hippocampus_1", "Right.Hippocampus_1",
-  "Left.Lateral.Ventricle_1", "Right.Lateral.Ventricle_1",
-  "Third.Ventricle_1", "Fourth.Ventricle_1",
-  "Frontal.Gray.Matter_1", "Parietal.Gray.Matter_1",
-  "Temporal.Gray.Matter_1", "Occipital.Gray.Matter_1",
-  "Caudate_1", "Putamen_1", "Amygdala_1", "Thalamus_1",
-  "White.Matter_1", "Brainstem_1", "Globus.Pallidus_1", "Cerebellum_1"
+  "Amygdala_1",
+  "Brainstem_1",
+  "Caudate_1",
+  "Cerebellum_1",
+  "Fourth.Ventricle_1",
+  "Frontal.Gray.Matter_1",
+  "Globus.Pallidus_1",
+  "White.Matter_1",
+  "Left.Hippocampus_1",
+  "Left.Lateral.Ventricle_1",
+  "Occipital.Gray.Matter_1",
+  "Parietal.Gray.Matter_1",
+  "Putamen_1",
+  "Right.Hippocampus_1",
+  "Right.Lateral.Ventricle_1",
+  "Temporal.Gray.Matter_1",
+  "Thalamus_1",
+  "Third.Ventricle_1"
 )
 
 kinarm_vars <- c(
@@ -498,7 +506,7 @@ kinarm_vars <- c(
 
 required_columns <- unique(c(
   "Participant_ID", "Age", "Age_actual", "Rating", "Sex", "Race", "AthleteType",
-  "Num_Diagnosed", "Num_Suspected", brain_vars, kinarm_vars
+  "Concussion_Group", brain_vars, kinarm_vars
 ))
 missing_columns <- setdiff(required_columns, names(dat))
 if (length(missing_columns) > 0) {
@@ -545,15 +553,11 @@ dat <- dat %>%
       Sport == "Hockey" ~ 1L,
       TRUE ~ 0L
     ),
-    Suspected_Concussion_History = case_when(
-      is.na(Num_Suspected) & is.na(Num_Diagnosed) ~ NA_integer_,
-      replace_na(as.numeric(Num_Suspected), 0) > 0 ~ 1L,
-      TRUE ~ 0L
-    )
+    Concussion_Group = factor(as.integer(Concussion_Group), levels = c(0L, 1L))
   )
 
-concussion_counts <- table(dat$Suspected_Concussion_History, useNA = "ifany")
-log_message("Suspected-concussion counts: ", paste(names(concussion_counts), concussion_counts, collapse = "; "))
+concussion_counts <- table(dat$Concussion_Group, useNA = "ifany")
+log_message("Concussion-history counts: ", paste(names(concussion_counts), concussion_counts, collapse = "; "))
 
 # -----------------------------------------------------------------------------
 # Table 1: participant characteristics
@@ -565,7 +569,7 @@ age_p <- kruskal.test(Age_actual ~ Performance_Group, data = dat)$p.value
 sex_p <- categorical_p(table(dat$Sex, dat$Performance_Group))
 sport_p <- categorical_p(table(dat$Sport, dat$Performance_Group))
 concussion_p <- suppressWarnings(
-  chisq.test(table(dat$Suspected_Concussion_History, dat$Performance_Group), correct = FALSE)$p.value
+  chisq.test(table(dat$Concussion_Group, dat$Performance_Group), correct = FALSE)$p.value
 )
 
 characteristic_rows <- list()
@@ -604,17 +608,17 @@ for (level in levels(droplevels(dat$Sport))) {
   )
 }
 add_characteristic_row(
-  paste0("Suspected-Concussion History (N=", sum(!is.na(dat$Suspected_Concussion_History)), ")"),
+  paste0("Concussion History (N=", sum(!is.na(dat$Concussion_Group)), ")"),
   p = format_p(concussion_p)
 )
 for (value in c(0L, 1L)) {
-  label <- if (value == 0L) "    No Suspected-Concussion History" else "    Suspected-Concussion History"
+  label <- if (value == 0L) "    No Concussion History" else "    Concussion History"
   add_characteristic_row(
     label,
-    format_count_pct(sum(dat$Suspected_Concussion_History == value, na.rm = TRUE), sum(!is.na(dat$Suspected_Concussion_History))),
-    format_count_pct(sum(dat$Suspected_Concussion_History == value & dat$Performance_Group == "High", na.rm = TRUE), sum(!is.na(dat$Suspected_Concussion_History) & dat$Performance_Group == "High")),
-    format_count_pct(sum(dat$Suspected_Concussion_History == value & dat$Performance_Group == "Mid", na.rm = TRUE), sum(!is.na(dat$Suspected_Concussion_History) & dat$Performance_Group == "Mid")),
-    format_count_pct(sum(dat$Suspected_Concussion_History == value & dat$Performance_Group == "Low", na.rm = TRUE), sum(!is.na(dat$Suspected_Concussion_History) & dat$Performance_Group == "Low"))
+    format_count_pct(sum(as.character(dat$Concussion_Group) == as.character(value), na.rm = TRUE), sum(!is.na(dat$Concussion_Group))),
+    format_count_pct(sum(as.character(dat$Concussion_Group) == as.character(value) & dat$Performance_Group == "High", na.rm = TRUE), sum(!is.na(dat$Concussion_Group) & dat$Performance_Group == "High")),
+    format_count_pct(sum(as.character(dat$Concussion_Group) == as.character(value) & dat$Performance_Group == "Mid", na.rm = TRUE), sum(!is.na(dat$Concussion_Group) & dat$Performance_Group == "Mid")),
+    format_count_pct(sum(as.character(dat$Concussion_Group) == as.character(value) & dat$Performance_Group == "Low", na.rm = TRUE), sum(!is.na(dat$Concussion_Group) & dat$Performance_Group == "Low"))
   )
 }
 
@@ -625,22 +629,22 @@ safe_write_csv(table1, file.path(output_root, "tables", "table_1_participant_cha
 # Brain PCA, bootstrap stability, and scree plot
 # -----------------------------------------------------------------------------
 
-log_message("Running brain PCA.")
+log_message("Running brain PCA using the original variable order and prcomp sign convention.")
 brain_mat <- as.matrix(dat[, brain_vars])
-if (anyNA(brain_mat)) stop("Brain PCA variables contain missing values.")
+storage.mode(brain_mat) <- "double"
+
+# Preserve the original analysis behavior: mean-impute each regional variable
+# before PCA. The released dataset is complete, but this keeps the workflow exact.
+brain_means <- colMeans(brain_mat, na.rm = TRUE)
+for (j in seq_len(ncol(brain_mat))) {
+  brain_mat[is.na(brain_mat[, j]), j] <- brain_means[j]
+}
+if (anyNA(brain_mat)) stop("Brain PCA variables still contain missing values after mean imputation.")
+
 brain_pca <- prcomp(brain_mat, center = TRUE, scale. = TRUE)
 brain_loadings <- brain_pca$rotation[, 1:5, drop = FALSE]
-brain_scores <- brain_pca$x[, 1:5, drop = FALSE]
+brain_scores <- scale(brain_pca$x[, 1:5, drop = FALSE])
 colnames(brain_loadings) <- paste0("PC", 1:5)
-colnames(brain_scores) <- paste0("PC", 1:5)
-
-brain_oriented <- orient_components(
-  brain_loadings, brain_scores,
-  anchors = c("Brainstem_1", "Right.Lateral.Ventricle_1", "White.Matter_1", "Putamen_1", "Amygdala_1"),
-  desired_signs = c(1, 1, 1, 1, -1)
-)
-brain_loadings <- brain_oriented$loadings
-brain_scores <- scale(brain_oriented$scores)
 colnames(brain_scores) <- paste0("Brain_PC", 1:5)
 dat <- bind_cols(dat, as_tibble(brain_scores))
 
@@ -697,23 +701,20 @@ safe_write_csv(brain_scree_data, file.path(output_root, "pca", "brain_pca_scree_
 # KINARM PCA, bootstrap stability, and scree plot
 # -----------------------------------------------------------------------------
 
-log_message("Running KINARM PCA.")
+log_message("Running KINARM PCA using the original variable order and prcomp sign convention.")
 kin_complete <- complete.cases(dat[, kinarm_vars])
 kin_dat <- as.matrix(dat[kin_complete, kinarm_vars])
+storage.mode(kin_dat) <- "double"
 if (nrow(kin_dat) != 44L) warning("Expected 44 complete KINARM cases; found ", nrow(kin_dat), ".")
-kin_pca <- prcomp(kin_dat, center = TRUE, scale. = TRUE)
+
+# Preserve the original analysis exactly: explicitly standardize first, then
+# call prcomp() without additional centering or scaling.
+kinarm_scaled <- scale(kin_dat)
+kin_pca <- prcomp(kinarm_scaled, center = FALSE, scale. = FALSE)
 kin_loadings <- kin_pca$rotation[, 1:5, drop = FALSE]
-kin_scores <- kin_pca$x[, 1:5, drop = FALSE]
+kin_scores <- kin_pca$x[, 1:5, drop = FALSE]  # Unstandardized outcome scores, as originally modeled.
 colnames(kin_loadings) <- paste0("PC", 1:5)
 colnames(kin_scores) <- paste0("PC", 1:5)
-
-kin_oriented <- orient_components(
-  kin_loadings, kin_scores,
-  anchors = c("RMScore.1", "Time.1", "ObjectHitZ", "Movement time (s)", "ArmPosRM"),
-  desired_signs = rep(1, 5)
-)
-kin_loadings <- kin_oriented$loadings
-kin_scores <- kin_oriented$scores  # Raw PCA scores, matching the fitted Gaussian models.
 
 for (j in 1:5) {
   dat[[paste0("KINARM_PC", j)]] <- NA_real_
@@ -849,10 +850,6 @@ base_priors_ordinal <- c(
   prior(normal(0, 0.5), class = "b"),
   prior(normal(0, 2), class = "Intercept")
 )
-strong_priors_ordinal <- c(
-  prior(normal(0, 0.25), class = "b"),
-  prior(normal(0, 2), class = "Intercept")
-)
 base_priors_binary <- c(
   prior(normal(0, 0.5), class = "b"),
   prior(normal(0, 1.5), class = "Intercept")
@@ -920,7 +917,7 @@ performance_hockey_formula <- as.formula(
   paste("Performance_Group ~", paste(c(brain_terms, "Sex", "Hockey"), collapse = " + "))
 )
 concussion_formula <- as.formula(
-  paste("Suspected_Concussion_History ~", paste(c(brain_terms, "Sex"), collapse = " + "))
+  paste("Concussion_Group ~", paste(c(brain_terms, "Sex"), collapse = " + "))
 )
 
 fit_performance <- fit_model(
@@ -949,12 +946,8 @@ fit_performance_nonhockey <- fit_model(
   filter(dat, Hockey == 0), cumulative("logit"),
   base_priors_ordinal, list(adapt_delta = 0.97), "bars"
 )
-fit_performance_strong_prior <- fit_model(
-  "performance_strong_prior", performance_formula, dat, cumulative("logit"),
-  strong_priors_ordinal, list(adapt_delta = 0.97), "bars"
-)
 fit_concussion <- fit_model(
-  "suspected_concussion", concussion_formula, dat, bernoulli("logit"),
+  "concussion", concussion_formula, dat, bernoulli("logit"),
   base_priors_binary, list(adapt_delta = 0.99, max_treedepth = 15), "bars"
 )
 
@@ -1034,7 +1027,6 @@ high_results <- summarize_model(fit_high_binary, exponentiate = TRUE)
 top_results <- summarize_model(fit_top_binary, exponentiate = TRUE)
 hockey_results <- summarize_model(fit_performance_hockey, exponentiate = TRUE)
 nonhockey_results <- summarize_model(fit_performance_nonhockey, exponentiate = TRUE)
-strong_results <- summarize_model(fit_performance_strong_prior, exponentiate = TRUE)
 concussion_results <- summarize_model(fit_concussion, exponentiate = TRUE)
 kinarm_results <- map_dfr(seq_along(kinarm_fits), function(j) {
   summarize_model(kinarm_fits[[j]], exponentiate = FALSE) %>%
@@ -1065,10 +1057,9 @@ safe_write_csv(
 
 s4b_raw <- bind_rows(
   mutate(hockey_results, Model = "Hockey-adjusted primary model (known sport; N=49)", .before = 1),
-  mutate(nonhockey_results, Model = "Non-hockey subset (N=27)", .before = 1),
-  mutate(strong_results, Model = "Primary model with Normal(0, 0.25) slope prior (N=51)", .before = 1)
+  mutate(nonhockey_results, Model = "Non-hockey subset (N=27)", .before = 1)
 )
-safe_write_csv(s4b_raw, file.path(output_root, "tables", "supplementary_table_s4b_sport_and_prior_sensitivity_raw.csv"))
+safe_write_csv(s4b_raw, file.path(output_root, "tables", "supplementary_table_s4b_sport_sensitivity_raw.csv"))
 safe_write_csv(
   s4b_raw %>% transmute(
     Model, Predictor,
@@ -1076,7 +1067,7 @@ safe_write_csv(
     `OR (95% CrI)` = sprintf("%.2f (%.2f to %.2f)", OR, OR_Lower, OR_Upper),
     `Pr(direction)` = sprintf("%.2f", Pr_direction)
   ),
-  file.path(output_root, "tables", "supplementary_table_s4b_sport_and_prior_sensitivity_formatted.csv")
+  file.path(output_root, "tables", "supplementary_table_s4b_sport_sensitivity_formatted.csv")
 )
 
 safe_write_csv(kinarm_results, file.path(output_root, "tables", "supplementary_table_s5_kinarm_models_raw.csv"))
@@ -1089,10 +1080,10 @@ safe_write_csv(
   file.path(output_root, "tables", "supplementary_table_s5_kinarm_models_formatted.csv")
 )
 
-safe_write_csv(concussion_results, file.path(output_root, "tables", "supplementary_table_s6_suspected_concussion_model_raw.csv"))
+safe_write_csv(concussion_results, file.path(output_root, "tables", "supplementary_table_s6_concussion_model_raw.csv"))
 safe_write_csv(
   format_coefficient_table(concussion_results, odds_ratio = TRUE),
-  file.path(output_root, "tables", "supplementary_table_s6_suspected_concussion_model_formatted.csv")
+  file.path(output_root, "tables", "supplementary_table_s6_concussion_model_formatted.csv")
 )
 
 # Figure 2: performance forest plot.
@@ -1127,7 +1118,7 @@ p_kin <- kinarm_results %>%
   theme(panel.grid.minor = element_blank())
 ggsave(file.path(output_root, "figures", "figure_3_kinarm_forest.png"), p_kin, width = 9, height = 10, dpi = 300)
 
-# Figure 5: suspected-concussion forest plot.
+# Figure 5: concussion-history forest plot.
 p_conc <- concussion_results %>%
   mutate(Predictor = factor(Predictor, levels = plot_order)) %>%
   ggplot(aes(x = Predictor, y = OR, ymin = OR_Lower, ymax = OR_Upper)) +
@@ -1139,7 +1130,7 @@ p_conc <- concussion_results %>%
   labs(x = NULL, y = "Odds ratio (95% credible interval)") +
   theme_bw(base_size = 10) +
   theme(panel.grid.minor = element_blank())
-ggsave(file.path(output_root, "figures", "figure_5_suspected_concussion_forest.png"), p_conc, width = 7, height = 4.5, dpi = 300)
+ggsave(file.path(output_root, "figures", "figure_5_concussion_forest.png"), p_conc, width = 7, height = 4.5, dpi = 300)
 
 # -----------------------------------------------------------------------------
 # Model diagnostics and run manifest
@@ -1202,13 +1193,13 @@ sample_sizes <- tibble(
   Analysis = c(
     "Brain PCA", "KINARM PCA", "Primary performance model", "Five-level performance model",
     "High-performance binary model", "Top-rating binary model", "Hockey-adjusted performance model",
-    "Non-hockey performance model", "Strong-prior performance model", "Suspected-concussion model",
+    "Non-hockey performance model", "Concussion-history model",
     paste0("KINARM PC", 1:5, " model")
   ),
   N = c(
     nrow(brain_mat), nrow(kin_dat), nobs(fit_performance), nobs(fit_rating5),
     nobs(fit_high_binary), nobs(fit_top_binary), nobs(fit_performance_hockey),
-    nobs(fit_performance_nonhockey), nobs(fit_performance_strong_prior), nobs(fit_concussion),
+    nobs(fit_performance_nonhockey), nobs(fit_concussion),
     vapply(kinarm_fits, nobs, numeric(1))
   )
 )
@@ -1230,8 +1221,9 @@ manifest_lines <- c(
   paste0("Stan warmup: ", brms_warmup),
   paste0("Stan backend: ", ifelse(nzchar(brms_backend), brms_backend, "brms default")),
   "Prespecified descriptive Pr(direction) threshold: 0.95",
-  "Suspected-concussion definition: Num_Suspected > 0; one participant missing both suspected and diagnosed fields excluded.",
-  "KINARM model outcomes use oriented, unstandardized PCA scores; brain predictors are standardized PCA scores.",
+  "Concussion-history definition: original validated Concussion_Group variable (0/1) supplied in the deidentified dataset.",
+  "PCA signs are the unmodified signs returned by the original prcomp workflows; bootstrap components are sign-aligned only to their corresponding original components.",
+  "KINARM model outcomes use unstandardized PCA scores; brain predictors are standardized PCA scores.",
   "Figures 1 and 4 are anatomical renderings and are not generated from the tabular post-segmentation dataset."
 )
 writeLines(manifest_lines, file.path(output_root, "run_manifest.txt"))
